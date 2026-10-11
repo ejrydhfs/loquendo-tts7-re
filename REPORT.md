@@ -1924,3 +1924,17 @@ FIR sections with float32 state. Stage audits vs the DLL: **0 differing samples*
 The residual, where present, is ±1 LSB from the remaining 1-ulp difference in the `FUN_10005080`
 P/Q cascade coefficients (333/4264 coefficients off by one float32 ulp) amplified near int16 rounding
 boundaries - i.e. at the noise floor of the DLL's own arithmetic.
+
+## 16.8 Final polish: 8 kHz stabilisation margin; VQ rounding tested (no effect)
+
+* The 8 kHz level's LSF stabilisation margin in the DLL is **0.002** (double at `0x10023ec0`, disasm
+  `0x10009a80`); the 16/32 kHz levels use 0.05 (`0x10023ec4`). The port used 0.05 for both. Fixing the
+  8 kHz value raised bit-exact samples from 172 031 to **172 622** of 192 000 (89.9 %) with the worst
+  per-window deviation unchanged at ±2 LSB.
+* Float32 rounding variants of the 5-stage VQ dequantiser (`stage5`/`stage2`: rounding after each partial
+  sum, or grouped) measured *identical* to the float64 version - so the VQ rounding is not what produces
+  the remaining ±1 LSB; that residual is the documented 1-ulp difference in the `FUN_10005080` P/Q
+  cascade (333/4264 coefficients) plus x87-vs-float64 edges elsewhere.
+* Net final state: **global correlation 1.0000, rms ratio 1.000, all 26 speech windows exactly 1.000000,
+  silence bit-exact, worst per-sample deviation ±2 int16 LSB**. Remaining exactness work is at the level
+  of the DLL's own rounding and no longer changes the decoded signal audibly or measurably.

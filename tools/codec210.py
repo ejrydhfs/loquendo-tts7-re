@@ -513,7 +513,9 @@ class Codec210:
         mem = list(self.lpc_mem8)
         prev = lsf_cur if self.lsf8_first else self.lsf8_prev
         for sf in range(4):
-            lsf_i = lsf_stabilise(lsf_interp(prev, lsf_cur, 10, sf, 4), 0.05)
+            # 8 kHz level: the DLL's stabilisation margin is 0.002 (double at 0x10023ec0, disasm 0x10009a80);
+            # the 16/32 kHz levels use 0.05 (0x10023ec4) - see specs/ExactOutput.md
+            lsf_i = lsf_stabilise(lsf_interp(prev, lsf_cur, 10, sf, 4), 0.002)
             a = lsf_to_lpc(lsf_i)
             self.tilt8[sf] = _tilt_pair(a)[1]
             x = self.buf[HIST + 40 * sf:HIST + 40 * sf + 40]

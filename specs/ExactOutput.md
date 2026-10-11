@@ -38,7 +38,14 @@ DLL's own excitation **and** its own 8 kHz LPC coefficients injected gives
 
 ---
 
-## 2. Do any operations need 80-bit emulation?  No.
+## 2. Do any *output-chain* operations need 80-bit emulation?  No.
+
+**Scoped to the three stages below** (`FUN_100030e0`, `FUN_10003960`, `FUN_1000c290`).
+This must **not** be generalised: the 8 kHz LTP `FUN_10006bb0` *does* need the 80-bit MAC
+and a direct 80→32 store (sibling `ExactExcitationArith`, `specs/ExactArith.md`; a
+double implementation leaves 2648/48000 excitation samples wrong on a float32-midpoint
+tie), and the DLL's cosine `FUN_10004af0` (§4.1) also evaluates in 80-bit.  For the three
+stages here, though, the measurement is unambiguous:
 
 For each of the three arithmetic stages I implemented **both** a plain-`double` and a
 `numpy.longdouble` (= x87 80-bit, 64-bit mantissa) variant and tested both against the DLL
@@ -204,14 +211,15 @@ values).  The residual is a rounding-control difference in the x87 cascade that 
 not close (double and 80-bit give the same count; the operation order was checked against
 the store trace).
 
-**This is still ≈40x closer than the port's polynomial and is the recommended patch, but
-it is not bit-exact** — treat it as a remaining item (§5).  Note: dropping the cascade
-into the full port *without* also making the LSF interpolation/stabilisation path and the
-16/32 kHz bands exact made the end-to-end slightly worse (52342 vs 49165 differing
-samples), because the residual 1-ULP error then interacts with the still-inexact upstream
-LSF path; apply it together with, not before, the rest of the chain.
+**This model is ≈40x closer than the port's polynomial *in isolation* but is NOT
+bit-exact, and it is NOT recommended as a patch**: dropped into the full port it makes the
+end-to-end *worse* — 52342 vs 49165 differing samples without the excitation fix, and
+19969 vs 15578 with the sibling's bit-exact excitation.  The port's existing polynomial
+`lsf_to_lpc` (with the §4.3 cosine) is the better end-to-end choice; the cascade is kept
+here as the root-cause analysis of `FUN_10005080` and as the starting point for closing
+the remaining 1-ULP residual.
 
-### 4.3 `_cos_apx` + cascade patch
+### 4.3 `_cos_apx` patch (recommended) — replaces `math.cos` in `lsf_to_lpc`
 
 ```python
 def _cos_apx(x):
@@ -226,8 +234,30 @@ def _cos_apx(x):
                    - 0.49991244077682495) * y + 0.9999933242797852))
 ```
 
-and `lsf_to_lpc` replaced by the cascade of §4.2 (see `/tmp/audit/codec210_out2.py`,
-function `lsf_to_lpc`).
+i.e. `c = [_cos_apx(w) for w in lsf]` instead of `c = [math.cos(w) for w in lsf]`.
+Do **not** also swap `lsf_to_lpc` for the §4.2 cascade (§4.2).
+
+### 4.4 Two further LSF-path mismatches found (open)
+
+While tracing why the port's `sig8` is not exact given the DLL excitation I compared the
+port's LSF at the `FUN_10005080` call with the DLL's (`/tmp/audit/lsf_cmp.py`,
+`/tmp/audit/vq_cmp.py`):
+
+* **the frame LSF itself (the 5-stage VQ output, DLL `0x300128a0`) is not bit-exact**:
+  frames 40..60, 198/200 coefficients differ, max abs **4.05e-6** (frame 40: port
+  `[0.31835938, 0.5390625, 0.69140625, …]` vs DLL `[0.31835774, 0.53906256, 0.69140685, …]`).
+  This propagates straight into the interpolated LSF (port vs DLL: 1579/1600 differ, max
+  5.16e-6) and hence into the LPC.  Fix would be float32 stores / x87 semantics in the VQ
+  stages.
+* **the 8 kHz stabilisation margin is wrong**: the DLL passes `0.002` (float at VA
+  `0x10023ec0`, disasm `0x10009a80`) for the 8 kHz level and `0.05` (float at
+  `0x10023ec4`, disasm `0x1000e4ad`) for the 16/32 kHz levels; the port uses `0.05` for
+  both.  On frames 40..80 the LSF spacing never reaches either value so the difference is
+  currently inert (forcing `0.002` changes no LSF), but it is a latent bug.
+
+The interpolation itself is `dst[i] = cur[i]*t + prev[i]*(1-t)` with `t = f32((sf+1)/nsub)`
+(the DLL's `FUN_10005520`), which is what the port does; the DLL passes prev/cur in
+`(0x300128d0, 0x300128a0)` order.
 
 ---
 
@@ -286,14 +316,18 @@ target (all windows 1.00000, global 1.000000) is **not** met yet.
 
 Remaining blockers, in order of effect:
 
-1. **The 8 kHz excitation recursion** — the sibling task `ExactExcitationArith` reports it
-   bit-exact (0/48000 samples, frames 0..299); with its `/tmp/codec210_ld.py` the end-to-end
-   PCM drops to 15578/192000 differing with max 186.  The residual (frames 294-296, and any
-   ±1 LSB dither) is *downstream* of the 8 kHz core, i.e. it is blocker 2 below plus the
-   still-inexact 16/32 kHz paths.
-2. **The LSF→LPC conversion** (`FUN_10005080`) — the §4.3 cosine is exact, but the
-   cascade still lands 1 float32 ULP off on ≈7.8% of coefficients (max 1.19e-7).  A 1-ULP
-   LPC error is amplified by the resonant synthesis to ±1..30 int16 LSBs, so this must be
-   closed too before the PCM is bit-exact.  Needed: the exact rounding control of the
-   x87 cascade (the section store trace is in `/tmp/audit/trace_lpc.py`).
-3. The 16/32 kHz band LPC uses the same `FUN_10005080`/cascade, so it inherits blocker 2.
+1. **The 8 kHz excitation recursion** (closed by the sibling) — `ExactExcitationArith`
+   reports it bit-exact (0/48000 samples, frames 0..299); with its `/tmp/codec210_ld.py`
+   the end-to-end PCM drops to 15578/192000 differing with max 186.  What is left is
+   *downstream* of the 8 kHz core, i.e. blocker 2 plus the still-inexact 16/32 kHz paths.
+2. **The LSF chain: the 5-stage VQ, then `FUN_10005080`** — the *frame LSF itself* (the VQ
+   output at DLL `0x300128a0`) is not bit-exact (198/200 coefficients, max 4.05e-6, §4.4),
+   and `FUN_10005080`'s cascade lands 1 float32 ULP off on ≈7.8% of coefficients (§4.2).
+   Both feed the LPC and a 1-ULP LPC error is amplified by the resonant synthesis.  Only
+   §4.3's cosine is closed there so far.
+3. The 16/32 kHz band LPC uses the same VQ/`FUN_10005080`, so it inherits blocker 2.
+
+Integration note: apply these patches **on top of** the sibling's excitation model
+(`tools/codec210.py::Codec210.ltp` + its `numpy.longdouble` MAC, `EXC_FLOOR` and `_LD32`),
+and do not "simplify" that model to plain double — unlike the three output-chain stages it
+genuinely needs 80-bit (§2); `/tmp/audit/mkcombined.py` does this stacking.
