@@ -56,6 +56,7 @@ DLL's own arithmetic. See `REPORT.md` §16.4-16.8 and `specs/ExactArith.md`, `sp
 | `probes/` | stage-local emulator probes used to close each stage (S gate, window provenance, write attribution, codebook probe) |
 | `session_scripts/` | the throwaway analysis scripts from the investigation (provenance: `session-notes.md`) |
 | `ghidra_scripts/` | the Ghidra headless dump script |
+| `omp-session-*.html` | unedited transcript of the whole reverse-engineering session (provenance; see `NOTICE.md`) |
 
 ## Quickstart
 
