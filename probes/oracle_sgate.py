@@ -6,33 +6,32 @@ The real window is the 120-float copy the pitch call leaves in its scratch buffe
 data, and the EIP inside memory hooks is unreliable in this Unicorn setup).  The port's window
 is captured by monkey-patching Codec210.ltp.
 
-Requires: unicorn + pefile (e.g. tools/venv/bin/python, see tools/oracle_attrib.py).
+Requires: unicorn + pefile (e.g. /tmp/uv/bin/python, see tools/oracle_attrib.py).
 
-Usage: tools/venv/bin/python tools/oracle_sgate.py [frame] [exc_scale]
+Usage: /tmp/uv/bin/python tools/oracle_sgate.py [frame] [exc_scale]
 """
 
 import os as _os
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
-_ROOT = _os.path.dirname(_HERE)                      # repo root (tools/ or probes/ are one level down)
+_ROOT = _os.path.dirname(_HERE)
 def _p(env, *parts):
     """Path helper: $env wins, else <repo>/<parts...> (put your unpacked voice package under voice/)."""
     v = _os.environ.get(env)
     return v if v else _os.path.join(_ROOT, *parts)
-
 VOICE = _os.environ.get("LTTS7_VOICE", _os.path.join(_ROOT, "voice"))
 DLL = _p("LTTS7_DLL", "voice", "bin", "LTTS7Codec210.dll")
 BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
          "Jorge.32000.LTTS7Codec210.44000.10.bin")
+
 import math
 import struct
 import sys
 
-sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, _os.path.join(_ROOT, "tools"))
 import codec210 as C
 import codec210_oracle as O
 import render_bin as R
 from unicorn import UC_HOOK_CODE
-
 
 FRAME = int(sys.argv[1]) if len(sys.argv) > 1 else 38
 SCALE = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0

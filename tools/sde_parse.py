@@ -22,6 +22,19 @@ Usage:
     python3 tools/sde_parse.py <file.sde> [--limit N] [--tokens]
 """
 
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_ROOT = _os.path.dirname(_HERE)
+def _p(env, *parts):
+    """Path helper: $env wins, else <repo>/<parts...> (put your unpacked voice package under voice/)."""
+    v = _os.environ.get(env)
+    return v if v else _os.path.join(_ROOT, *parts)
+VOICE = _os.environ.get("LTTS7_VOICE", _os.path.join(_ROOT, "voice"))
+DLL = _p("LTTS7_DLL", "voice", "bin", "LTTS7Codec210.dll")
+BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
+         "Jorge.32000.LTTS7Codec210.44000.10.bin")
+
+
 import argparse
 import collections
 import sys
