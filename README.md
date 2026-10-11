@@ -22,18 +22,29 @@ shipped voice to within the DLL's own floating-point rounding.
   gains (`float32(Q[b3]·float32(exp(g8/3.5)))`, second pass ×5/11), the 16 kHz coded and 32 kHz noise
   bands, both QMF level combines and the float→int16 stage.
 
-Measured against the real, unmodified DLL (Unicorn-emulated ground truth):
+Measured against the real, unmodified DLL (Unicorn-emulated ground truth), 600 frames = 38.4 s of the
+shipped voice:
 
 | metric | value |
 |---|---|
-| global correlation, 300 frames (19.2 s of speech) | **0.99965** |
-| amplitude (rms) ratio | **1.001** |
-| speech 10-frame windows | min 0.9991, median **1.00000**, 19 of 26 exactly 1.00000 |
-| adaptive-codebook gate (S gate) | **1.0000** (4/4 sub-frames) |
-| per-band buffers (16 kHz / 32 kHz) | **1.000000** each |
+| global correlation | **1.0000** |
+| amplitude (rms) ratio | **1.000** |
+| speech 10-frame windows (56) | 48 within **±1** int16 LSB, 7 within ±2, 1 within ±3 |
+| silence windows | bit-exact (one window: 2 samples off by 1 LSB) |
+| 8 kHz excitation (buffer `0x30012364`) | **bit-exact** - 0 of 48 000 samples over 300 frames |
+| stage audits: LPC synth / band filter / combine / cos | **0 differing samples** (83 840 / 251 520 / 125 760 / 4 784) |
+| bit-exact PCM samples | 87.7 % (336 589 / 384 000); the rest differ by 1-2 LSB |
 
-The remaining difference is float32 rounding in near-cancelling sums plus the int16 clamp floor — i.e. the
-codec is reproduced as exactly as the DLL's own arithmetic allows. See `REPORT.md` §16.4–16.5.
+```
+$ python3 tools/verify_codec.py ref600.raw 600
+frames 600, samples 384000
+GLOBAL corr +1.0000   rms mine   2921.8  ref   2921.7  (ratio 1.000)
+```
+
+The excitation recursion is bit-exact and every stage of the output chain reproduces the DLL given its
+inputs; what remains is a slow ULP-level drift (a 1-ulp difference in the `FUN_10005080` LSF->LPC cascade,
+333 of 4264 coefficients) that can move a sample by one or two codes over long runs - the noise floor of the
+DLL's own arithmetic. See `REPORT.md` §16.4-16.8 and `specs/ExactArith.md`, `specs/ExactOutput.md`.
 
 ## Layout
 
