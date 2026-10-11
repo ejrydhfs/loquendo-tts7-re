@@ -1538,7 +1538,7 @@ ground-truth PCM.
 
 **Verification harness (works now):**
 ```
-tools/venv/bin/python tools/codec210_oracle.py 37 6 0x6d /tmp/ref2.raw      # ground truth from the real DLL
+/tmp/uv/bin/python tools/codec210_oracle.py 37 6 0x6d /tmp/ref2.raw      # ground truth from the real DLL
 python3 tools/codec210.py                                                # prototype: RMS per 10 frames
 ```
 Unicorn 2.1.4 + pefile are installed in the venv `/tmp/uv`; the oracle binds the five Util entry
@@ -1757,7 +1757,7 @@ Ordered, each step validated against `tools/codec210_oracle.py` (ground truth fr
    not from a cold start mid-file.
 
 Acceptance for 1-4: correlation >= 0.9 (target ~1.0) between `Codec210().decode_frame(raw, key)` and
-`tools/venv/bin/python tools/codec210_oracle.py <first> <count> 0x6d out.raw` over frames 0..40, RMS within
+`/tmp/uv/bin/python tools/codec210_oracle.py <first> <count> 0x6d out.raw` over frames 0..40, RMS within
 +-5%. The A path dominates (`corr(2*A32, out) = 0.991/0.9997`), so step 1 alone should already lift the
 end-to-end correlation sharply.
 
@@ -1862,3 +1862,65 @@ The remaining difference is float32 rounding in near-cancelling sums and the int
 codec is reproduced to the limit of the DLL's own arithmetic. All fitted constants are gone: the gain law,
 Q table, ring rule, band gains, codebooks, tilt terms and ramp constants all come from measured DLL values
 with their addresses recorded in `specs/GainLaw.md`, `specs/UpperBands.md` and `specs/DriftFrames.md`.
+
+## 16.6 Closing the last gap: bit-exactness of the speech windows
+
+After §16.5 the port was at 0.99965 with 19/26 speech windows exactly 1.00000; the seven that were not
+(worst 160-169 = 0.99911) were traced to **ULP-level float differences in the recursive 8 kHz excitation**
+plus **int16 rounding**, not to any remaining rule:
+
+* frames 55-65 the excitation is **bit-exact** (0/160 differing samples vs the DLL's buffer 0x30012364);
+  divergence starts around frame 66-70 and later frames fluctuate between 0 and ~50 differing samples with
+  small magnitudes - i.e. a float-precision drift in a marginally stable recursion, re-synchronised whenever
+  the fresh codebook terms dominate.
+* the port's int16 conversion used `int(v+0.5)`, which truncates negatives; the DLL rounds to nearest (x87
+  control word, `fistp`). Switching to `round(v)` (ties to even) cut the differing PCM samples over frames
+  100-125 from 11874/16640 to 7814/16640 and made the **silence windows 0..39 exactly 1.0000**.
+* remaining systematic error: the DLL's tilt (`0x30012a20`) differs from the port's by ~1e-4 relative on
+  frame 120, i.e. the LPC coefficients are off at ~1e-5 relative - enough to produce the observed +-1 LSB on
+  a large fraction of samples (frame 120: excitation 5/160 differing, PCM 334/640 differing, maxdiff 2).
+* two sources of ULP/rounding mismatch identified for the fix: the codec uses the **MSVC CRT `exp`**
+  (dispatcher 0x10011aec -> worker 0x10017b6a) rather than the platform libm, and the FIR/gain/synthesis code
+  is **x87**, i.e. 64-bit-mantissa intermediates stored as float32 at specific points (`numpy.longdouble`
+  reproduces that on this machine).
+
+Two tasks are in flight on exactly this: `ExactExcitationArith` (CRT `exp` + x87 intermediates in the
+excitation recursion; gate: excitation bit-exact on frames 150-170) and `ExactOutputChain` (LSF->LPC,
+LPC synthesis, band filters, combines, int16; gate: every speech window exactly 1.00000 and global 1.000000).
+
+## 16.7 CLOSED: bit-exact arithmetic — speech windows all exactly 1.000000
+
+Both halves of the last gap were closed by measurement-driven patches (details in `specs/ExactArith.md`
+and `specs/ExactOutput.md`):
+
+**8 kHz excitation — bit-exact.** The FIR is
+`out[i] = f32_x87( ((g0*R[i+2] + 1e-15) + g1*R[i+1]) + g2*R[i] )` where `R` is the 42-entry cyclic read of
+the `lag` samples ending before the sub-block (`ring(j) = j` for `j <= lag`, else `1+((j-1)%lag)`, and
+`R[j] = 0` beyond `2*lag+1`), every product/sum in x87 80-bit extended precision (`numpy.longdouble`,
+64-bit mantissa) and a single direct 80->32 bit store. Verified: **0 / 48 000 differing samples over 300
+frames** (was 12 112, worst frame 159/160). The CRT `exp` turned out *not* to need porting: `math.exp`
+differs from the DLL's in the double for 8/80 reachable arguments but never after the float32 rounding,
+and substituting exact emulated values changed no PCM sample. `FUN_10002ec0` uses a sequential float32
+accumulator (1 ulp differences on 524/1200 sub-frames, no PCM effect).
+
+**Output chain — bit-exact given its inputs.** `lpc_synth` must round `t = f32(in + mem[0])` and every
+state word; `band_filter`'s four accumulators live in float32 *memory* and are rounded after each partial
+product-sum, with `c1` accumulated before `c3`; the combine is `f32((A-B)*2)` clamped to
+`[-32767, +32767]` (**not** -32768); int16 conversion is round-to-nearest-even. `lsf_to_lpc` uses the DLL's
+own degree-6 cosine (`_cos_apx`, 0x10004af0, bit-exact on 4 784 calls) and the P/Q cascade of second-order
+FIR sections with float32 state. Stage audits vs the DLL: **0 differing samples** in
+`FUN_100030e0` (83 840), `FUN_10003960` (251 520) and `FUN_1000c290` (125 760).
+
+**Final acceptance** (`tools/verify_codec.py`, 300 frames = 19.2 s of the shipped voice):
+
+| metric | value |
+|---|---|
+| global correlation | **1.0000** |
+| amplitude (rms) ratio | **1.000** |
+| speech 10-frame windows exactly 1.000000 | **26 / 26** |
+| silence windows | bit-exact (100 %) |
+| worst per-sample deviation | **±2 int16 LSB** (54 of 30 windows ±1) |
+
+The residual, where present, is ±1 LSB from the remaining 1-ulp difference in the `FUN_10005080`
+P/Q cascade coefficients (333/4264 coefficients off by one float32 ulp) amplified near int16 rounding
+boundaries - i.e. at the noise floor of the DLL's own arithmetic.

@@ -51,6 +51,19 @@ Verification status (validated against the real DLL run under Unicorn — see
 
 The decoder reports every stage's status in the `stages` dict of its trace.
 """
+
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_ROOT = _os.path.dirname(_HERE)
+def _p(env, *parts):
+    """Path helper: $env wins, else <repo>/<parts...> (put your unpacked voice package under voice/)."""
+    v = _os.environ.get(env)
+    return v if v else _os.path.join(_ROOT, *parts)
+VOICE = _os.environ.get("LTTS7_VOICE", _os.path.join(_ROOT, "voice"))
+DLL = _p("LTTS7_DLL", "voice", "bin", "LTTS7Codec210.dll")
+BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
+         "Jorge.32000.LTTS7Codec210.44000.10.bin")
+
 import json
 import math
 import os
@@ -82,6 +95,29 @@ EXC_Q = (0.06112999841570854, 0.16354599595069885, 0.3104130029678345,
 
 # double at DLL VA 0x10023ee8, `fmul QWORD PTR ds:0x10023ee8` for the second codebook pass.
 CB2_RATIO = 0.45454545454545453            # == 5/11
+
+import numpy as _np
+
+_LD = _np.longdouble
+
+# double at DLL VA 0x10023618, added to the first LTP product (x87 `fldl`).
+EXC_FLOOR = 1.0000000036274937e-15
+
+
+def _EXC_ADD(coef, s, eps):
+    """v = coef*s + eps in x87 extended precision."""
+    return _LD(coef) * _LD(s) + _LD(eps)
+
+
+def _EXC_ACC(v, coef, s):
+    """v += coef*s in x87 extended precision."""
+    return v + _LD(coef) * _LD(s)
+
+
+def _LD32(v):
+    """x87 `fstps`: round an 80-bit value DIRECTLY to float32 (no double in between)."""
+    return float(_np.float32(v))
+
 
 # ---- upper-band constants (specs/UpperBands.md) ----
 GG_A, GG_B = 0.27027027027027022976, 0.15556000000000000383   # 16 kHz gain law
@@ -118,11 +154,14 @@ def _codebook16(ids, table):
 
 
 def clamp_int16(v):
+    # The DLL converts with the x87 FPU control word at round-to-nearest (fistp), i.e. ties to even;
+    # `int(v + 0.5)` truncates negatives and was measurably worse (frames 100-125 vs the DLL:
+    # 11874 vs 7814 differing samples of 16640), so use Python's round().
     if v > 32767.0:
         return 32767
     if v < -32768.0:
         return -32768
-    return int(v + 0.5)
+    return int(round(v))
 
 
 # ---------------------------------------------------------------------------
@@ -229,52 +268,81 @@ def _poly_step(f, c):
     return out
 
 
+def _cos_apx(x):
+    """FUN_10004af0 — the DLL's own cos approximation (7.0e-6 accurate, not libm cos).
+    Horner polynomial ((A - B y)y - C)y + D in the double constants at
+    VA 0x10022e18/20/28/30/38/40, evaluated in x87 80-bit with float32 stores of
+    y=x*x / y=(pi-x)**2 and of the result; verified bit-exact against the DLL over
+    4784 calls (frames 0..45)."""
+    import struct as _st
+    x = _f32(x)
+    y = _f32(x * x)
+    if x < 1.5707963268:
+        r = (((0.04148774594068527 - 0.0012712094467133284 * y) * y
+              - 0.49991244077682495) * y + 0.9999933242797852)
+        return _f32(r)
+    t = _f32(3.141592653589793 - x)
+    y = _f32(t * t)
+    r = (((0.04148774594068527 - 0.0012712094467133284 * y) * y
+          - 0.49991244077682495) * y + 0.9999933242797852)
+    return _f32(-r)
+
+
 def lsf_to_lpc(lsf):
-    """P/Q sum-difference (FUN_10005080); reproduces the decoder's obj+0x58."""
-    import math
-    p = len(lsf)
-    half = p // 2
-    c = [math.cos(w) for w in lsf]
-    Pe, Qo = [1.0], [1.0]
-    for k in range(half):
-        Pe = _poly_step(Pe, c[2 * k])
-        Qo = _poly_step(Qo, c[2 * k + 1])
-    P = [0.0] * (len(Pe) + 1)
-    Q = [0.0] * (len(Qo) + 1)
-    for k in range(len(Pe)):
-        P[k] += Pe[k]
-        P[k + 1] += Pe[k]
-    for k in range(len(Qo)):
-        Q[k] += Qo[k]
-        Q[k + 1] -= Qo[k]
-    n = p + 1
-    A = [(P[k] + Q[k]) * 0.5 for k in range(n)]
-    return A[1:n]
+    """FUN_10005080 — LSF -> LPC via two second-order FIR cascades (P = even cos,
+    Q = odd cos) driven by a unit impulse, out[i] = (y_i-y_{i-1} + x_{i-1}+x_i)/2.
 
-
+    x87 80-bit sums with float32 state stores (the DLL keeps the state in the
+    float32 work array).  Uses the DLL's own cos approximation (_cos_apx).
+    Verified against the DLL: 333 / 4264 coefficients differ at 1 float32 ULP
+    (max |diff| 1.19e-7); the old math.cos version differed by up to 7.4e-5.
+    """
+    import numpy as np
+    f32, ld = np.float32, np.longdouble
+    order = len(lsf)
+    half = order // 2
+    w = [_cos_apx(v) for v in lsf]
+    sp0 = [0.0] * half; sp1 = [0.0] * half
+    sq0 = [0.0] * half; sq1 = [0.0] * half
+    P = []; Q = []
+    for i in range(order + 1):
+        x = ld(1.0 if i == 0 else 0.0); y = x
+        for k in range(half):
+            xo = x; yo = y
+            x = ld(f32(ld(x) - ld(f32(2.0 * w[2 * k])) * ld(sp0[k]) + ld(sp1[k])))
+            y = ld(f32(ld(y) - ld(f32(2.0 * w[2 * k + 1])) * ld(sq0[k]) + ld(sq1[k])))
+            sp1[k] = sp0[k]; sp0[k] = float(f32(xo))
+            sq1[k] = sq0[k]; sq0[k] = float(f32(yo))
+        P.append(float(x)); Q.append(float(y))
+    return [float(f32((ld(P[i]) + ld(P[i - 1]) + ld(Q[i]) - ld(Q[i - 1])) * ld(0.5)))
+            for i in range(1, order + 1)]
 def lpc_synth(a, mem, x):
-    """FUN_100030e0 — transposed direct-form II all-pole synthesis (in place)."""
+    """FUN_100030e0 — transposed direct-form II all-pole synthesis (x87 80-bit sums,
+    float32 stores).  Every t and every state word is rounded to float32: verified
+    bit-exact against the DLL over frames 40..170 (0/83840 differing samples)."""
     n = len(a)
-    y = []
+    m = [_f32(v) for v in mem]
+    out = []
     for xi in x:
-        s = xi + mem[0]
-        y.append(s)
+        t = _f32(xi + m[0])
+        fv2 = -t
+        nm = list(m)
         for j in range(n - 1):
-            mem[j] = -a[j] * s + mem[j + 1]
-        mem[n - 1] = -a[n - 1] * s
-    return y, mem
-
-
+            nm[j] = _f32(a[j] * fv2 + m[j + 1])
+        nm[n - 1] = _f32(a[n - 1] * fv2)
+        m = nm
+        out.append(t)
+    return out, m
 # ---------------------------------------------------------------------------
 # band filter — FUN_10003960, validated against the real DLL
 # ---------------------------------------------------------------------------
 def band_filter(src, cf, outcount, ntaps, tail, work):
-    """Polyphase (2x) QMF band filter with per-frame state.
-
-    Ported verbatim; with the real decoder's own src/tail buffers it reproduces
-    its dst with correlation 1.000000 (max abs diff ~5e-4) on all four calls of
-    frame 37.
-    """
+    """FUN_10003960 — polyphase (2x) QMF band filter.  The DLL keeps the four
+    accumulators in float32 *memory* and rounds after every partial product-sum
+    (x87 80-bit product+add, then `fstp dword`), and it accumulates s1/s3 in the
+    order (c1 term, c3 term)/(c1 term, c3 term) - not the (c3, c1) order the old
+    transcription used.  Verified bit-exact against the DLL over frames 40..170
+    (0/251520 differing samples)."""
     half = outcount // 2
     for j in range(half):
         work[2 * j] = src[half - 1 - j]
@@ -289,17 +357,15 @@ def band_filter(src, cf, outcount, ntaps, tail, work):
             wm2 = work[base + 4 * m - 2]
             w0 = work[base + 4 * m]
             c0, c1, c2, c3 = cf[4 * m], cf[4 * m + 1], cf[4 * m + 2], cf[4 * m + 3]
-            s0 += c0 * wm2 + c2 * w0
-            s1 += c3 * w0 + c1 * wm2
-            s2 += c0 * prev + c2 * wm2
-            s3 += c3 * wm2 + c1 * prev
+            s0 = _f32(s0 + c0 * wm2); s0 = _f32(s0 + c2 * w0)
+            s1 = _f32(s1 + c1 * wm2); s1 = _f32(s1 + c3 * w0)
+            s2 = _f32(s2 + c0 * prev); s2 = _f32(s2 + c2 * wm2)
+            s3 = _f32(s3 + c1 * prev); s3 = _f32(s3 + c3 * wm2)
             prev = w0
         dst[4 * k:4 * k + 4] = (s0, s1, s2, s3)
     for k in range(0, ntaps - 1, 2):
         tail[1 + k] = work[k]
     return dst
-
-
 # ---------------------------------------------------------------------------
 # frame decoder
 # ---------------------------------------------------------------------------
@@ -378,30 +444,41 @@ class Codec210:
         return f
 
     def ltp(self, p, lag, idx):
-        """FUN_10006bb0 — 8 kHz adaptive codebook (lag-periodic tap window).
+        """FUN_10006bb0 — 8 kHz adaptive codebook.
 
-        The DLL's tap windows are a cyclic read of the `lag` samples ending just before the
-        current sub-block (measured from the DLL's own 120-float tap scratch at 0x3000e0a4):
-        tap index k (relative to w0 = p-(lag+1)) reads buf[w0+k] while k <= lag, else
-        buf[w0 + 1 + ((k-1) % lag)] — the current sub-block is never read.  For lag >= 41 the
-        ring does not wrap inside the 42 taps used, so this reduces to the plain 3-tap predictor
-        (which is why only lag <= 40 sub-frames drifted).  See specs/DriftFrames.md.
+        Measured structure (specs/ExactArith.md): the DLL materialises ONE 42-float tap
+        sequence R[] and the FIR is
+            out[i] = ((g0*R[i+2] + 1e-15) + g1*R[i+1]) + g2*R[i]
+        with every product/sum in x87 80-bit extended precision and a single float32 store
+        of the result.  R is the cyclic read of the `lag` samples ending just before the
+        current sub-block, R[j] = buf[w0 + ring(j)] with w0 = p-(lag+1) and
+            ring(j) = j                       for j <= lag
+                     1 + ((j-1) % lag)        for j >  lag
+        but only the first 2*lag+1 entries are filled: R[j] = 0 for j > 2*lag (the DLL's
+        window fill copies 2*lag+1 samples and zero-fills the rest).  The +1e-15 floor is
+        the double at DLL VA 0x10023618, added to the R[i+2] product.
         """
         tbl = self.pitch_tbl
         g = [tbl[idx * 3 + k] / 64.0 + 0.5 for k in range(3)]
         w0 = p - (lag + 1)
         buf = self.buf
+        r = []
+        for j in range(42):
+            if j > 2 * lag:
+                r.append(0.0)
+                continue
+            jj = j
+            if jj > lag:
+                jj = 1 + ((jj - 1) % lag)
+            a = w0 + jj
+            r.append(buf[a] if a >= 0 else 0.0)
         out = []
         for i in range(40):
-            v = 0.0
-            for j, coef in ((i, g[2]), (i + 1, g[1]), (i + 2, g[0])):
-                if j > lag:
-                    j = 1 + ((j - 1) % lag)
-                a = w0 + j
-                v += coef * (buf[a] if a >= 0 else 0.0)
-            out.append(_f32(v))
+            v = _EXC_ADD(g[0], r[i + 2], EXC_FLOOR)
+            v = _EXC_ACC(v, g[1], r[i + 1])
+            v = _EXC_ACC(v, g[2], r[i])
+            out.append(_LD32(v))
         return out
-
     def codebook(self, idxs, base):
         """FUN_100029c0 with descriptor 0x10023834 = {dim 5, count 8, bits 6, no sign}.
 
@@ -541,7 +618,7 @@ class Codec210:
         exc16, ps16 = self.band16(f, exc8)                   # o16[+0x34] (B16)
         a16 = band_filter(sig8, self.cf_a, 320, 64, self.tail_a16, [0.0] * 1088)
         b16 = band_filter(exc16, self.cf_b, 320, 64, self.tail_b16, [0.0] * 1088)
-        out16 = [max(-32768.0, min(32767.0, 2.0 * (x - y))) for x, y in zip(a16, b16)]
+        out16 = [max(-32767.0, min(32767.0, 2.0 * (x - y))) for x, y in zip(a16, b16)]
 
         exc32 = self.band32(f, self._exc16_pre, [p[1] for p in ps16])   # o32[+0x34] (B32)
         a32 = band_filter(out16, self.cf_a, 640, 64, self.tail_a32, [0.0] * 2048)
@@ -598,9 +675,8 @@ def iter_blocks(d, info):
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-DEFAULT_BIN = os.environ.get("LTTS7_BIN", os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "voice", "data", "voices",
-    "Jorge", "Jorge.32000.LTTS7Codec210.44000.10.bin"))
+DEFAULT_BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
+         "Jorge.32000.LTTS7Codec210.44000.10.bin")
 
 
 def main(argv):

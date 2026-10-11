@@ -1,17 +1,3 @@
-import os as _os
-_HERE = _os.path.dirname(_os.path.abspath(__file__))
-_ROOT = _os.path.dirname(_HERE)                      # repo root (tools/ or probes/ are one level down)
-def _p(env, *parts):
-    """Path helper: $env wins, else <repo>/<parts...> (put your unpacked voice package under voice/)."""
-    v = _os.environ.get(env)
-    return v if v else _os.path.join(_ROOT, *parts)
-
-VOICE = _os.environ.get("LTTS7_VOICE", _os.path.join(_ROOT, "voice"))
-DLL = _p("LTTS7_DLL", "voice", "bin", "LTTS7Codec210.dll")
-BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
-         "Jorge.32000.LTTS7Codec210.44000.10.bin")
-
-
 #!/usr/bin/env python3
 """Reference PCM oracle for LTTS7Codec210.dll (Jorge build) via x86 emulation.
 
@@ -42,6 +28,19 @@ Emulation notes (all needed to make the MSVC-2008 binary run):
   * the decode driver FUN_10004290 is a register-based function
     (ESI = context, EDI = 110-byte block) and writes 640 int16 to ctx+0x11D4.
 """
+
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_ROOT = _os.path.dirname(_HERE)
+def _p(env, *parts):
+    """Path helper: $env wins, else <repo>/<parts...> (put your unpacked voice package under voice/)."""
+    v = _os.environ.get(env)
+    return v if v else _os.path.join(_ROOT, *parts)
+VOICE = _os.environ.get("LTTS7_VOICE", _os.path.join(_ROOT, "voice"))
+DLL = _p("LTTS7_DLL", "voice", "bin", "LTTS7Codec210.dll")
+BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
+         "Jorge.32000.LTTS7Codec210.44000.10.bin")
+
 import os
 import struct
 import sys
@@ -50,7 +49,6 @@ import pefile
 from unicorn import Uc, UcError, UC_ARCH_X86, UC_MODE_32, UC_PROT_ALL
 from unicorn import UC_HOOK_CODE
 from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX,
-
                                UC_X86_REG_EDX, UC_X86_REG_ESI, UC_X86_REG_EDI,
                                UC_X86_REG_ESP, UC_X86_REG_EIP,
                                UC_X86_REG_FPCW, UC_X86_REG_FPSW)

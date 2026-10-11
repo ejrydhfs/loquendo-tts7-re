@@ -60,10 +60,12 @@ python3 tools/render_unit.py "$LTTS7_VOICE/data/voices/Jorge/Jorge.32000.LTTS7Co
                             "$LTTS7_VOICE/data/voices/Jorge/Jorge.sde" 1 unit.wav
 ```
 
-Ground-truth comparison (needs `unicorn` + `pefile`):
+The decoder itself needs `numpy` (for 80-bit `longdouble`, used to match the DLL's x87 intermediates);
+the emulation oracle additionally needs `unicorn` + `pefile`:
 
 ```bash
-python3 -m venv tools/venv && tools/venv/bin/pip install -r tools/requirements-oracle.txt
+pip install -r tools/requirements.txt
+python3 -m venv tools/venv && tools/venv/bin/pip install -r tools/requirements.txt -r tools/requirements-oracle.txt
 tools/venv/bin/python tools/codec210_oracle.py 0 300 0x6d ref.raw   # reference PCM from the real DLL
 python3 tools/verify_codec.py ref.raw 300                           # correlation / rms table
 ```

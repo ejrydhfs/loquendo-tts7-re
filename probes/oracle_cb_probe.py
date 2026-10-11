@@ -10,24 +10,23 @@ Requires: unicorn + pefile.
 
 import os as _os
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
-_ROOT = _os.path.dirname(_HERE)                      # repo root (tools/ or probes/ are one level down)
+_ROOT = _os.path.dirname(_HERE)
 def _p(env, *parts):
     """Path helper: $env wins, else <repo>/<parts...> (put your unpacked voice package under voice/)."""
     v = _os.environ.get(env)
     return v if v else _os.path.join(_ROOT, *parts)
-
 VOICE = _os.environ.get("LTTS7_VOICE", _os.path.join(_ROOT, "voice"))
 DLL = _p("LTTS7_DLL", "voice", "bin", "LTTS7Codec210.dll")
 BIN = _p("LTTS7_BIN", "voice", "data", "voices", "Jorge",
          "Jorge.32000.LTTS7Codec210.44000.10.bin")
+
 import json
 import struct
 import sys
 
-sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, _os.path.join(_ROOT, "tools"))
 import codec210_oracle as O
 from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_WRITE
-
 
 FRAME = int(sys.argv[1]) if len(sys.argv) > 1 else 38
 EXC = 0x30012364
@@ -60,7 +59,7 @@ o.uc.hook_add(UC_HOOK_MEM_WRITE, cb_w)
 o.decode(ctx, d[O.BLOCK_OFFSET + FRAME * O.BLOCK_SIZE:O.BLOCK_OFFSET + (FRAME + 1) * O.BLOCK_SIZE])
 
 import codec210 as C
-T = json.load(open(_os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "tools", "codec210_tables.json")))
+T = json.load(open(_os.path.join(_ROOT, "tools", "codec210_tables.json")))
 CB = T["codebooks"]["innovation"]["cb_256x5"]["int8"]
 NSEG = len(CB) // 5
 dec = C.Codec210()
