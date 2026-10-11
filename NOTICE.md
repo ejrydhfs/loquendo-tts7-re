@@ -16,3 +16,11 @@ the tools expect the user to supply their own licensed copy (see the README).
 The reverse engineering was performed for interoperability, format documentation and preservation.
 "Loquendo", "TTS Director" and related marks belong to their respective owners. This project is
 unaffiliated with, and not endorsed by, those owners.
+
+## Session transcript
+
+`omp-session-*.html` is the unedited transcript of the reverse-engineering session that produced this
+repository. It is included for provenance: it contains the working notes, the reasoning trail, tool output
+and short excerpts of decompiled code and extracted data analysed for interoperability. It is not a
+distributable part of the software and carries the same notice as the rest of this repository - no binaries,
+installers, voice data or other copyrighted material are redistributed here.
