@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+tools/venv/
+ref*.raw
+*.wav
+voice/
+*.exe
+*.rar
+*.bin
+!tools/*.json

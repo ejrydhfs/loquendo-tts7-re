@@ -1,0 +1,30 @@
+import sys, struct, json
+sys.path.insert(0,'/home/asdf/Downloads/ltts_re/tools')
+from codec210_oracle import Oracle, BIN, BLOCK_OFFSET, BLOCK_SIZE
+NF=38
+o = Oracle()
+ctx = o.open_decoder(32000, 0x6D)
+d=open(BIN,'rb').read()
+for i in range(NF+1):
+    o.decode(ctx, d[BLOCK_OFFSET+i*BLOCK_SIZE:BLOCK_OFFSET+(i+1)*BLOCK_SIZE])
+o32=o.r32(ctx+0x28); o16=o.r32(o32+4); o8=o.r32(o16+4)
+def fl(a,n): return list(struct.unpack("<%df"%n, bytes(o.uc.mem_read(a,4*n))))
+b3_32=fl(0x30002c30,16); b2_32=fl(0x30002730,16); tilt32=fl(0x30002720,4)
+b3_16=fl(0x30008570,16); b2_16=fl(0x300082f0,16); tilt16=fl(0x300082e0,4)
+print("o32 tilt",["%.4f"%x for x in tilt32])
+print("o32 b2  ",["%.3f"%x for x in b2_32])
+print("o32 b3  ",["%.3f"%x for x in b3_32])
+print("o16 tilt",["%.4f"%x for x in tilt16])
+print("o16 b2  ",["%.3f"%x for x in b2_16])
+print("o16 b3  ",["%.3f"%x for x in b3_16])
+print("o16[+0x48] exc16",["%.3f"%x for x in fl(o.r32(o16+0x48),16)])
+print("o32[+0x48] exc32",["%.3f"%x for x in fl(o.r32(o32+0x48),16)])
+print("o8[+0x3c] (8k exc?)",["%.3f"%x for x in fl(o.r32(o8+0x3c),16)])
+print("o8[+0x40] ",["%.3f"%x for x in fl(o.r32(o8+0x40),16)])
+print("o8[+0x30] synth",["%.3f"%x for x in fl(o.r32(o8+0x30),16)])
+print("o16[+0x34] synth16",["%.3f"%x for x in fl(o.r32(o16+0x34),16)])
+print("o32[+0x34] synth32",["%.3f"%x for x in fl(o.r32(o32+0x34),16)])
+j=json.load(open('/home/asdf/Downloads/ltts_re/jorge_re/exc_stages_frame38.json'))
+print("golden keys:",list(j.keys())[:10])
+for k,v in list(j.items())[:6]:
+    print(k, str(v)[:300])
